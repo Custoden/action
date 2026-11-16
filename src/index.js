@@ -5,6 +5,7 @@ import { discover, isCiFile, isLockfile, isWorkflow } from './files.js'
 import { createGitHub } from './github.js'
 import { changedPackages, packageKey, parserFor } from './lockfiles.js'
 import { annotations, commentBody, evaluate, markdown } from './report.js'
+import { tamperFindings } from './tamper.js'
 
 /**
  * @typedef {import('./report.js').PackageResult} PackageResult
@@ -100,10 +101,13 @@ async function main() {
 
   /** @type {string[]} */
   let changed = []
+  /** @type {string[]} */
+  let removed = []
   if (base) {
     try {
       const diff = await github.changedFiles(base, head)
       changed = diff.files
+      removed = diff.removed
       if (!diff.complete) results.notes.push('The change touches more files than can be listed. Only the first 3,000 were considered.')
     } catch (err) {
       results.notes.push(message(err))
@@ -137,6 +141,35 @@ async function main() {
     if (!(err instanceof ApiError)) return
     if (err.status === 0 || err.status >= 500) unreachable = true
     if (err.status === 0 || err.status === 429 || err.status >= 500) stopped = err.message
+  }
+
+  const stopRuns = async () => {
+    if (!cancel || results.cancelled.length > 0 || !evaluate(results, failOn).failed) return
+    const runId = Number(process.env.GITHUB_RUN_ID)
+    try {
+      results.cancelled.push(...(await github.cancelRuns(runsSha, runId)))
+      await new Promise((r) => setTimeout(r, 10_000))
+      const seen = new Set(results.cancelled.map((r) => r.id))
+      for (const r of await github.cancelRuns(runsSha, runId)) if (!seen.has(r.id)) results.cancelled.push(r)
+      const done = results.cancelled.filter((r) => r.cancelled).length
+      console.log(`Cancelled ${done} other ${done === 1 ? 'run' : 'runs'} on ${runsSha.slice(0, 7)}.`)
+    } catch (err) {
+      console.log(`::warning::${message(err)}`)
+    }
+  }
+  if (base) {
+    const guarded = (/** @type {string} */ p) => isWorkflow(p) || /^\.github\/actions\/custoden\//i.test(p)
+    for (const file of [...changed.filter(guarded), ...removed.filter(guarded)]) {
+      try {
+        const before = await github.fileAt(file, base)
+        const after = removed.includes(file) ? null : await readHead(file)
+        const findings = tamperFindings(file, before, after)
+        if (findings.length > 0) results.files.push({ file, findings, tamper: true })
+      } catch (err) {
+        results.notes.push(`\`${file}\`: ${message(err)}`)
+      }
+    }
+    await stopRuns()
   }
 
   const workflowPaths = checkWorkflows ? changed.filter(isWorkflow) : []
@@ -198,20 +231,6 @@ async function main() {
     }
   }
 
-  const stopRuns = async () => {
-    if (!cancel || results.cancelled.length > 0 || !evaluate(results, failOn).failed) return
-    const runId = Number(process.env.GITHUB_RUN_ID)
-    try {
-      results.cancelled.push(...(await github.cancelRuns(runsSha, runId)))
-      await new Promise((r) => setTimeout(r, 10_000))
-      const seen = new Set(results.cancelled.map((r) => r.id))
-      for (const r of await github.cancelRuns(runsSha, runId)) if (!seen.has(r.id)) results.cancelled.push(r)
-      const done = results.cancelled.filter((r) => r.cancelled).length
-      console.log(`Cancelled ${done} other ${done === 1 ? 'run' : 'runs'} on ${runsSha.slice(0, 7)}.`)
-    } catch (err) {
-      console.log(`::warning::${message(err)}`)
-    }
-  }
   await stopRuns()
 
   /** @type {Map<string, PackageResult>} */
@@ -274,7 +293,7 @@ async function main() {
   await append(output, `result=${outcome.failed ? 'fail' : 'pass'}`)
   await append(output, `packages-checked=${results.packages.filter((r) => r.report).length}`)
   await append(output, `workflows-checked=${results.workflows.filter((r) => r.report).length}`)
-  await append(output, `files-checked=${results.files.filter((r) => r.findings).length}`)
+  await append(output, `files-checked=${results.files.filter((r) => r.findings && !r.tamper).length}`)
   await append(output, `findings=${outcome.flaggedPackages.length + outcome.findings.length}`)
   await append(output, `cancelled-runs=${results.cancelled.filter((r) => r.cancelled).length}`)
   await append(output, `report=${reportPath}`)

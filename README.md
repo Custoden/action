@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: Custoden/action@v0.2.0
+      - uses: Custoden/action@v0.3.0
 ```
 
 Pin `Custoden/action` to the commit SHA of the release too, with the version as a comment.
@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: Custoden/action@v0.2.0
+      - uses: Custoden/action@v0.3.0
   test:
     needs: custoden
     runs-on: ubuntu-latest
@@ -76,7 +76,7 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: Custoden/action@v0.2.0
+      - uses: Custoden/action@v0.3.0
         with:
           cancel-runs: true
           comment: true
@@ -84,9 +84,21 @@ jobs:
 
 With `cancel-runs: true`, a failed check cancels every other run for the pull request's commit, including workflows the pull request added, and lists them in the summary and comment. Do not add a checkout of the pull request head to this workflow.
 
+### If a pull request removes Custoden
+
+A pull request can delete the gate from the workflows it triggers, but not the guard, which runs from your default branch. The guard reports these changes as `high` findings, so they fail the check and, with `cancel-runs`, stop the pull request's runs:
+
+| Rule | When |
+|---|---|
+| `custoden-removed` | A workflow that ran Custoden no longer does, or is deleted |
+| `custoden-weakened` | Fewer jobs wait for the Custoden job, or the step gets `continue-on-error`, a `never` threshold or a check turned off |
+| `custoden-modified` | A copy of the action vendored in `.github/actions/custoden` is changed |
+
+If you remove Custoden on purpose, merge the change and the guard stops reporting it.
+
 ### What this can and cannot stop
 
-- Jobs gated with `needs` never start, so their code never runs.
+- Jobs gated with `needs` never start, so their code never runs, unless the pull request also removes the gate. The guard then reports the removal and cancels the run, which is a race.
 - Cancelling is a race. A run that starts at the same moment as the guard may execute its first steps before it is stopped. Payloads that collect for a while before sending are usually stopped in time, but rotate any secret a cancelled run could read.
 - Someone with write access can push to a branch and trigger `push` workflows directly. Protect your default branch, require pull requests, and keep secrets in environments with required reviewers.
 - Do not rely on required status checks alone. Some payloads post forged `success` statuses for the check names a repository requires.

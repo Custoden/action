@@ -8,7 +8,7 @@ import { COMMENT_MARKER } from './github.js'
  * @typedef {import('./lockfiles.js').Package} Package
  * @typedef {{ pkg: Package, files: string[], report?: PackageReport, error?: string }} PackageResult
  * @typedef {{ file: string, report?: WorkflowReport, error?: string }} WorkflowResult
- * @typedef {{ file: string, findings?: FileFinding[], error?: string }} FileResult
+ * @typedef {{ file: string, findings?: FileFinding[], error?: string, tamper?: boolean }} FileResult
  * @typedef {{ id: number, name: string, url: string, cancelled: boolean }} CancelledRun
  * @typedef {{ packages: PackageResult[], workflows: WorkflowResult[], files: FileResult[], notes: string[], cancelled: CancelledRun[] }} Results
  * @typedef {{ packages: 'malicious' | 'suspicious' | 'review' | 'never', workflows: Severity | 'never', incomplete: boolean }} FailOn
@@ -87,7 +87,7 @@ export function markdown(results, outcome) {
   const scope = [
     count(results.packages.filter((r) => r.report).length, 'package', 'packages'),
     count(results.workflows.filter((r) => r.report).length, 'workflow', 'workflows'),
-    count(results.files.filter((r) => r.findings).length, 'CI file', 'CI files'),
+    count(results.files.filter((r) => r.findings && !r.tamper).length, 'CI file', 'CI files'),
   ]
   const scopeText = `${scope[0]}, ${scope[1]} and ${scope[2]}`
   const lines = ['## Custoden', '']

@@ -34,24 +34,26 @@ export function createGitHub(options) {
 
   return {
     /**
-     * Files changed between two commits, excluding removed files.
+     * Files changed between two commits, with removed files listed separately.
      * @param {string} base
      * @param {string} head
-     * @returns {Promise<{ files: string[], complete: boolean }>}
+     * @returns {Promise<{ files: string[], removed: string[], complete: boolean }>}
      */
     async changedFiles(base, head) {
       /** @type {string[]} */
       const files = []
+      /** @type {string[]} */
+      const removed = []
       for (let page = 1; page <= 30; page++) {
         const res = await call(`/repos/${options.repository}/compare/${base}...${head}?per_page=100&page=${page}`)
         if (!res.ok) throw new Error(`Could not compare ${base.slice(0, 7)}...${head.slice(0, 7)} (HTTP ${res.status}). The token needs contents: read.`)
         const body = /** @type {any} */ (await res.json())
         /** @type {Array<{ filename: string, status: string }>} */
         const list = body.files ?? []
-        for (const f of list) if (f.status !== 'removed') files.push(f.filename)
-        if (list.length < 100) return { files, complete: true }
+        for (const f of list) (f.status === 'removed' ? removed : files).push(f.filename)
+        if (list.length < 100) return { files, removed, complete: true }
       }
-      return { files, complete: false }
+      return { files, removed, complete: false }
     },
 
     /**
