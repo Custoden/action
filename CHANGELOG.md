@@ -2,6 +2,12 @@
 
 All notable changes to Custoden Check. Versions follow [Semantic Versioning](https://semver.org).
 
+## [0.3.0] - 2026-11-16
+
+### Added
+
+- Reports pull requests that remove or weaken Custoden: `custoden-removed` when a workflow stops running it or is deleted, `custoden-weakened` when fewer jobs wait for it or it is set to never fail, and `custoden-modified` when a vendored copy of the action changes. These are `high` findings, so they fail the check and trigger `cancel-runs`.
+
 ## [0.2.0] - 2026-11-16
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "name": "custoden-action",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "GitHub Action that checks new and changed dependencies and workflows with the Custoden API",
   "license": "MIT",
