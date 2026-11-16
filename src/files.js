@@ -5,6 +5,45 @@ import { parserFor } from './lockfiles.js'
 const SKIP_DIRS = new Set(['node_modules', '.git', '.venv', 'venv', '__pycache__', 'dist', 'build', 'vendor', '.tox', '.next', 'coverage'])
 const MAX_DEPTH = 8
 
+const CI_FILES = new Set([
+  'package.json',
+  'setup.py',
+  'setup.cfg',
+  'pyproject.toml',
+  'conftest.py',
+  'noxfile.py',
+  'tox.ini',
+  'Makefile',
+  'makefile',
+  'GNUmakefile',
+  'build.rs',
+  'action.yml',
+  'action.yaml',
+  'Rakefile',
+  'Taskfile.yml',
+  'justfile',
+])
+
+/** @param {string} path */
+export const isWorkflow = (path) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path)
+
+/** @param {string} path */
+const skipped = (path) => path.split('/').some((part) => SKIP_DIRS.has(part))
+
+/**
+ * Files that run during CI and are sent for analysis: package manifests, build and test setup, Makefiles,
+ * scripts and composite actions.
+ * @param {string} path
+ */
+export function isCiFile(path) {
+  if (skipped(path) || isWorkflow(path)) return false
+  const base = path.slice(path.lastIndexOf('/') + 1)
+  return CI_FILES.has(base) || /\.(sh|bash|ps1|mk)$/i.test(base) || path.startsWith('.husky/')
+}
+
+/** @param {string} path */
+export const isLockfile = (path) => !skipped(path) && Boolean(parserFor(path))
+
 /**
  * Lockfiles and workflow files in the workspace, as repository-relative paths with forward slashes.
  * @param {string} root

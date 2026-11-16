@@ -7,9 +7,13 @@
  * @typedef {{ rule: string, severity: Severity, title: string, detail: string, remediation: string, location: { line: number, column: number, job: string | null, step: string | null } }} WorkflowFinding
  * @typedef {{ summary: Record<Severity, number> & { total: number }, findings: WorkflowFinding[] }} WorkflowReport
  * @typedef {{ input: Package, report?: PackageReport, error?: { code: string, message: string } }} BatchResult
+ * @typedef {{ rule: string, severity: Severity, title: string, detail: string, path: string, line: number }} FileFinding
+ * @typedef {{ summary: Record<Severity, number> & { total: number }, findings: FileFinding[] }} FilesReport
  */
 
 export const BATCH_SIZE = 10
+export const FILES_BATCH_SIZE = 10
+export const FILES_BATCH_BYTES = 200 * 1024
 
 export class ApiError extends Error {
   /**
@@ -96,6 +100,18 @@ export function createClient(options) {
         body: JSON.stringify({ packages }),
       })
       return body.results
+    },
+
+    /**
+     * @param {Array<{ path: string, content: string }>} files At most FILES_BATCH_SIZE files.
+     * @returns {Promise<FilesReport>}
+     */
+    async analyzeFiles(files) {
+      return request('/v1/github/files/analyze', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ files }),
+      })
     },
 
     /**

@@ -1,16 +1,18 @@
-import { appendFile, readFile, writeFile } from 'node:fs/promises'
+import { access, appendFile, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { ApiError, BATCH_SIZE, createClient } from './api.js'
-import { discover } from './files.js'
+import { ApiError, BATCH_SIZE, FILES_BATCH_BYTES, FILES_BATCH_SIZE, createClient } from './api.js'
+import { discover, isCiFile, isLockfile, isWorkflow } from './files.js'
 import { createGitHub } from './github.js'
 import { changedPackages, packageKey, parserFor } from './lockfiles.js'
 import { annotations, commentBody, evaluate, markdown } from './report.js'
 
 /**
- * @typedef {import('./lockfiles.js').Package} Package
  * @typedef {import('./report.js').PackageResult} PackageResult
  * @typedef {import('./report.js').WorkflowResult} WorkflowResult
+ * @typedef {import('./report.js').FileResult} FileResult
+ * @typedef {import('./report.js').CancelledRun} CancelledRun
  * @typedef {import('./report.js').FailOn} FailOn
+ * @typedef {import('./report.js').Results} Results
  */
 
 /** @param {string} name @param {string} [fallback] */
@@ -39,12 +41,24 @@ async function append(file, text) {
   if (file) await appendFile(file, text.endsWith('\n') ? text : `${text}\n`)
 }
 
-/** @param {any} event @param {string} name */
-function baseCommit(event, name) {
-  if (name === 'pull_request' || name === 'pull_request_target') return event.pull_request?.base?.sha ?? null
-  if (name === 'merge_group') return event.merge_group?.base_sha ?? null
-  if (name === 'push' && typeof event.before === 'string' && !/^0+$/.test(event.before)) return event.before
-  return null
+/** @param {unknown} err */
+const message = (err) => (err instanceof Error ? err.message : String(err))
+
+/**
+ * Which commits to compare, where to read changed files from, and which commit's runs to cancel.
+ * @param {any} event
+ * @param {string} name
+ */
+function commits(event, name) {
+  const sha = process.env.GITHUB_SHA ?? ''
+  if (name === 'pull_request' || name === 'pull_request_target') {
+    const remote = name === 'pull_request_target'
+    const head = event.pull_request?.head?.sha ?? sha
+    return { base: event.pull_request?.base?.sha ?? null, head: remote ? head : sha, runs: head, remote }
+  }
+  if (name === 'merge_group') return { base: event.merge_group?.base_sha ?? null, head: event.merge_group?.head_sha ?? sha, runs: sha, remote: false }
+  if (name === 'push' && typeof event.before === 'string' && !/^0+$/.test(event.before)) return { base: event.before, head: sha, runs: sha, remote: false }
+  return { base: null, head: sha, runs: sha, remote: false }
 }
 
 async function main() {
@@ -61,6 +75,8 @@ async function main() {
   }
   const checkPackages = boolInput('packages', true)
   const checkWorkflows = boolInput('workflows', true)
+  const checkFiles = boolInput('ci-files', true)
+  const cancel = boolInput('cancel-runs', false)
   const comment = boolInput('comment', false)
   const maxPackages = Number(input('max-packages', '50'))
   if (!Number.isInteger(maxPackages) || maxPackages < 1) throw new Error('Input max-packages must be a positive integer.')
@@ -76,68 +92,42 @@ async function main() {
     token: input('github-token'),
   })
 
-  const base = baseCommit(event, eventName)
-  if (eventName === 'pull_request_target') {
-    console.log('::warning::On pull_request_target the workspace holds whatever you checked out. Make sure it is the pull request head if you want its changes checked.')
-  }
+  const { base, head, runs: runsSha, remote } = commits(event, eventName)
+  process.env.CUSTODEN_HEAD_SHA = head
 
-  const found = await discover(workspace)
+  /** @type {Results} */
+  const results = { packages: [], workflows: [], files: [], notes: [], cancelled: [] }
+
   /** @type {string[]} */
-  const notes = []
-  if (found.lockfiles.length === 0 && found.workflows.length === 0) {
-    notes.push('No lockfiles or workflows found in the workspace. Run actions/checkout before this action.')
-  }
-
-  /** @type {Map<string, PackageResult>} */
-  const packages = new Map()
-  if (checkPackages && found.lockfiles.length > 0) {
-    if (!base) {
-      notes.push('Packages are checked on pull requests, merge queues and pushes, where new and changed versions can be found.')
-    } else {
-      for (const file of found.lockfiles) {
-        const parser = /** @type {NonNullable<ReturnType<typeof parserFor>>} */ (parserFor(file))
-        try {
-          const after = parser.parse(await readFile(join(workspace, file), 'utf8'))
-          const previous = await github.fileAt(file, base)
-          const before = previous === null ? [] : parser.parse(previous)
-          for (const p of changedPackages(before, after)) {
-            const key = packageKey(p)
-            const existing = packages.get(key)
-            if (existing) existing.files.push(file)
-            else packages.set(key, { pkg: p, files: [file] })
-          }
-        } catch (err) {
-          notes.push(`\`${file}\`: ${err instanceof Error ? err.message : String(err)}`)
-        }
-      }
+  let changed = []
+  if (base) {
+    try {
+      const diff = await github.changedFiles(base, head)
+      changed = diff.files
+      if (!diff.complete) results.notes.push('The change touches more files than can be listed. Only the first 3,000 were considered.')
+    } catch (err) {
+      results.notes.push(message(err))
+    }
+  } else {
+    const found = await discover(workspace)
+    changed = found.workflows
+    if (found.workflows.length === 0 && found.lockfiles.length === 0) {
+      results.notes.push('No lockfiles or workflows found in the workspace. Run actions/checkout before this action.')
+    } else if (checkPackages && found.lockfiles.length > 0) {
+      results.notes.push('Packages and CI files are checked on pull requests, merge queues and pushes, where changes can be found.')
     }
   }
 
-  /** @type {WorkflowResult[]} */
-  const workflows = []
-  /** @type {Map<string, string>} */
-  const workflowSources = new Map()
-  if (checkWorkflows) {
-    for (const file of found.workflows) {
-      const source = await readFile(join(workspace, file), 'utf8')
-      if (base) {
-        const previous = await github.fileAt(file, base).catch((err) => {
-          notes.push(err instanceof Error ? err.message : String(err))
-          return null
-        })
-        if (previous === source) continue
-      }
-      workflowSources.set(file, source)
-      workflows.push({ file })
+  /** @param {string} path */
+  const readHead = async (path) => {
+    if (!remote) {
+      const local = join(workspace, path)
+      if (await access(local).then(() => true, () => false)) return readFile(local, 'utf8')
     }
+    const content = await github.fileAt(path, head)
+    if (content === null) throw new Error('File not found at the head commit.')
+    return content
   }
-
-  const queue = [...packages.values()]
-  if (queue.length > maxPackages) {
-    for (const r of queue.slice(maxPackages)) r.error = `Over the max-packages limit of ${maxPackages}.`
-  }
-  const toCheck = queue.slice(0, maxPackages)
-  console.log(`Checking ${toCheck.length} new or changed ${toCheck.length === 1 ? 'package' : 'packages'} and ${workflows.length} ${workflows.length === 1 ? 'workflow' : 'workflows'}${base ? ` against ${base.slice(0, 7)}` : ''}.`)
 
   /** @type {string | null} */
   let stopped = null
@@ -148,6 +138,104 @@ async function main() {
     if (err.status === 0 || err.status >= 500) unreachable = true
     if (err.status === 0 || err.status === 429 || err.status >= 500) stopped = err.message
   }
+
+  const workflowPaths = checkWorkflows ? changed.filter(isWorkflow) : []
+  const filePaths = checkFiles && base ? changed.filter(isCiFile) : []
+  const lockfilePaths = checkPackages && base ? changed.filter(isLockfile) : []
+  console.log(
+    `Checking ${workflowPaths.length} workflows, ${filePaths.length} CI files and ${lockfilePaths.length} lockfiles${base ? ` changed since ${base.slice(0, 7)}` : ''}.`,
+  )
+
+  for (const file of workflowPaths) {
+    /** @type {WorkflowResult} */
+    const result = { file }
+    results.workflows.push(result)
+    if (stopped) {
+      result.error = stopped
+      continue
+    }
+    try {
+      result.report = await client.analyzeWorkflow(await readHead(file))
+    } catch (err) {
+      result.error = message(err)
+      stopOn(err)
+    }
+  }
+
+  /** @type {Array<{ result: FileResult, content: string }>} */
+  const pending = []
+  for (const file of filePaths) {
+    /** @type {FileResult} */
+    const result = { file }
+    results.files.push(result)
+    try {
+      const content = await readHead(file)
+      if (content.length > FILES_BATCH_BYTES) result.error = 'File is too large to analyze.'
+      else pending.push({ result, content })
+    } catch (err) {
+      result.error = message(err)
+    }
+  }
+  while (pending.length > 0) {
+    /** @type {typeof pending} */
+    const batch = []
+    let bytes = 0
+    while (pending.length > 0 && batch.length < FILES_BATCH_SIZE && bytes + pending[0].content.length <= FILES_BATCH_BYTES) {
+      const next = /** @type {(typeof pending)[number]} */ (pending.shift())
+      bytes += next.content.length
+      batch.push(next)
+    }
+    if (stopped) {
+      for (const b of batch) b.result.error = stopped
+      continue
+    }
+    try {
+      const report = await client.analyzeFiles(batch.map((b) => ({ path: b.result.file, content: b.content })))
+      for (const b of batch) b.result.findings = report.findings.filter((f) => f.path === b.result.file)
+    } catch (err) {
+      for (const b of batch) b.result.error = message(err)
+      stopOn(err)
+    }
+  }
+
+  const stopRuns = async () => {
+    if (!cancel || results.cancelled.length > 0 || !evaluate(results, failOn).failed) return
+    const runId = Number(process.env.GITHUB_RUN_ID)
+    try {
+      results.cancelled.push(...(await github.cancelRuns(runsSha, runId)))
+      await new Promise((r) => setTimeout(r, 10_000))
+      const seen = new Set(results.cancelled.map((r) => r.id))
+      for (const r of await github.cancelRuns(runsSha, runId)) if (!seen.has(r.id)) results.cancelled.push(r)
+      const done = results.cancelled.filter((r) => r.cancelled).length
+      console.log(`Cancelled ${done} other ${done === 1 ? 'run' : 'runs'} on ${runsSha.slice(0, 7)}.`)
+    } catch (err) {
+      console.log(`::warning::${message(err)}`)
+    }
+  }
+  await stopRuns()
+
+  /** @type {Map<string, PackageResult>} */
+  const packages = new Map()
+  for (const file of lockfilePaths) {
+    const parser = /** @type {NonNullable<ReturnType<typeof parserFor>>} */ (parserFor(file))
+    try {
+      const after = parser.parse(await readHead(file))
+      const previous = await github.fileAt(file, /** @type {string} */ (base))
+      const before = previous === null ? [] : parser.parse(previous)
+      for (const p of changedPackages(before, after)) {
+        const key = packageKey(p)
+        const existing = packages.get(key)
+        if (existing) existing.files.push(file)
+        else packages.set(key, { pkg: p, files: [file] })
+      }
+    } catch (err) {
+      results.notes.push(`\`${file}\`: ${message(err)}`)
+    }
+  }
+  results.packages = [...packages.values()]
+  for (const r of results.packages.slice(maxPackages)) r.error = `Over the max-packages limit of ${maxPackages}.`
+  const toCheck = results.packages.slice(0, maxPackages)
+
   for (let i = 0; i < toCheck.length; i += BATCH_SIZE) {
     const batch = toCheck.slice(i, i + BATCH_SIZE)
     if (stopped) {
@@ -155,32 +243,18 @@ async function main() {
       continue
     }
     try {
-      const results = await client.checkPackages(batch.map((r) => r.pkg))
-      results.forEach((res, j) => {
-        if (res.report) batch[j].report = res.report
-        else batch[j].error = res.error?.message ?? 'No result.'
+      const res = await client.checkPackages(batch.map((r) => r.pkg))
+      res.forEach((item, j) => {
+        if (item.report) batch[j].report = item.report
+        else batch[j].error = item.error?.message ?? 'No result.'
       })
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      for (const r of batch) r.error = message
+      for (const r of batch) r.error = message(err)
       stopOn(err)
     }
   }
+  await stopRuns()
 
-  for (const w of workflows) {
-    if (stopped) {
-      w.error = stopped
-      continue
-    }
-    try {
-      w.report = await client.analyzeWorkflow(/** @type {string} */ (workflowSources.get(w.file)))
-    } catch (err) {
-      w.error = err instanceof Error ? err.message : String(err)
-      stopOn(err)
-    }
-  }
-
-  const results = { packages: queue, workflows, notes }
   const outcome = evaluate(results, failOn)
   const summary = markdown(results, outcome)
 
@@ -191,35 +265,34 @@ async function main() {
     if (unreachable) console.log(`::${level}::Custoden API could not be reached, so ${what}. See the job summary.`)
     else console.log(`::${level}::Custoden: ${what}. See the job summary.`)
   }
-  for (const r of outcome.flaggedPackages) {
-    console.log(`${r.report?.verdict.padEnd(10)} ${r.pkg.ecosystem}:${r.pkg.name}@${r.pkg.version}`)
-  }
   await append(process.env.GITHUB_STEP_SUMMARY ?? '', summary)
 
   const reportPath = join(process.env.RUNNER_TEMP || workspace, 'custoden-report.json')
-  await writeFile(reportPath, JSON.stringify({ base, failed: outcome.failed, ...results }, null, 2))
+  await writeFile(reportPath, JSON.stringify({ base, head, failed: outcome.failed, ...results }, null, 2))
 
   const output = process.env.GITHUB_OUTPUT ?? ''
   await append(output, `result=${outcome.failed ? 'fail' : 'pass'}`)
-  await append(output, `packages-checked=${queue.filter((r) => r.report).length}`)
-  await append(output, `workflows-checked=${workflows.filter((r) => r.report).length}`)
-  await append(output, `findings=${outcome.flaggedPackages.length + outcome.workflowFindings.length}`)
+  await append(output, `packages-checked=${results.packages.filter((r) => r.report).length}`)
+  await append(output, `workflows-checked=${results.workflows.filter((r) => r.report).length}`)
+  await append(output, `files-checked=${results.files.filter((r) => r.findings).length}`)
+  await append(output, `findings=${outcome.flaggedPackages.length + outcome.findings.length}`)
+  await append(output, `cancelled-runs=${results.cancelled.filter((r) => r.cancelled).length}`)
   await append(output, `report=${reportPath}`)
 
   const prNumber = event.pull_request?.number
   if (comment && typeof prNumber === 'number') {
-    const flagged = outcome.flaggedPackages.length + outcome.workflowFindings.length + outcome.errors
+    const flagged = outcome.flaggedPackages.length + outcome.findings.length + outcome.errors
     try {
       await github.upsertComment(prNumber, commentBody(summary), { createIfMissing: flagged > 0 })
     } catch (err) {
-      console.log(`::warning::${err instanceof Error ? err.message : String(err)}`)
+      console.log(`::warning::${message(err)}`)
     }
   }
 
   if (outcome.failed) {
     const parts = []
     if (outcome.failingPackages.length) parts.push(`${outcome.failingPackages.length} ${outcome.failingPackages.length === 1 ? 'package is' : 'packages are'} ${failOn.packages} or worse`)
-    if (outcome.failingFindings.length) parts.push(`${outcome.failingFindings.length} workflow ${outcome.failingFindings.length === 1 ? 'finding is' : 'findings are'} ${failOn.workflows} or higher`)
+    if (outcome.failingFindings.length) parts.push(`${outcome.failingFindings.length} ${outcome.failingFindings.length === 1 ? 'finding is' : 'findings are'} ${failOn.workflows} or higher`)
     if (failOn.incomplete && outcome.errors) parts.push(`${outcome.errors} ${outcome.errors === 1 ? 'item' : 'items'} could not be checked`)
     console.log(`::error::Custoden: ${parts.join(', ')}.`)
     process.exitCode = 1
@@ -227,6 +300,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.log(`::error::Custoden: ${err instanceof Error ? err.message : String(err)}`)
+  console.log(`::error::Custoden: ${message(err)}`)
   process.exitCode = 1
 })

@@ -46,24 +46,33 @@ function sample() {
         }),
       },
     ],
+    files: [
+      {
+        file: 'tests/conftest.py',
+        findings: [{ rule: 'checkout-token-extraction', severity: 'critical', title: 'Reads the checkout token', detail: 'Contains "extraheader".', path: 'tests/conftest.py', line: 4 }],
+      },
+    ],
     notes: [],
+    cancelled: [],
   }
 }
 
 const defaults = /** @type {import('../src/report.js').FailOn} */ ({ packages: 'suspicious', workflows: 'high', incomplete: false })
 
 describe('evaluate', () => {
-  it('fails on a malicious package but not on a medium workflow finding', () => {
+  it('fails on a malicious package and a critical CI file finding, not on a medium workflow finding', () => {
     const outcome = evaluate(sample(), defaults)
     assert.equal(outcome.failed, true)
     assert.equal(outcome.failingPackages.length, 1)
-    assert.equal(outcome.failingFindings.length, 0)
+    assert.deepEqual(outcome.failingFindings.map((f) => f.rule), ['checkout-token-extraction'])
     assert.equal(outcome.errors, 1)
   })
 
   it('respects never and incomplete', () => {
     assert.equal(evaluate(sample(), { packages: 'never', workflows: 'never', incomplete: false }).failed, false)
     assert.equal(evaluate(sample(), { packages: 'never', workflows: 'medium', incomplete: false }).failed, true)
+    const noFiles = { ...sample(), files: [] }
+    assert.equal(evaluate(noFiles, { packages: 'never', workflows: 'high', incomplete: false }).failed, false)
     assert.equal(evaluate(sample(), { packages: 'never', workflows: 'never', incomplete: true }).failed, true)
   })
 })
@@ -72,7 +81,8 @@ describe('output', () => {
   it('renders packages, workflow findings, vulnerabilities and unchecked items', () => {
     const results = sample()
     const md = markdown(results, evaluate(results, defaults))
-    assert.match(md, /\*\*Failed\.\*\* Checked 2 packages and 1 workflow\./)
+    assert.match(md, /\*\*Failed\.\*\* Checked 2 packages, 1 workflow and 1 CI file\./)
+    assert.match(md, /Reads the checkout token/)
     assert.match(md, /`evil-pkg@1\.0\.0` \(npm\) \| malicious/)
     assert.match(md, /Action pinned to a tag/)
     assert.match(md, /GHSA-xxxx/)
@@ -87,5 +97,17 @@ describe('output', () => {
     assert.ok(lines[0].startsWith('::error file=package-lock.json,title=evil-pkg@1.0.0 is malicious::'))
     assert.ok(lines[1].startsWith('::warning file=.github/workflows/ci.yml,line=12,col=9,title=medium%3A Bad%2C really%3A bad::'))
     assert.ok(lines[1].includes('%0A'))
+    assert.ok(lines[2].startsWith('::error file=tests/conftest.py,line=4,col=1,'))
+  })
+
+  it('lists cancelled runs', () => {
+    const results = sample()
+    results.cancelled = [
+      { id: 1, name: 'Build audit', url: 'https://github.com/o/r/actions/runs/1', cancelled: true },
+      { id: 2, name: 'CI', url: 'https://github.com/o/r/actions/runs/2', cancelled: false },
+    ]
+    const md = markdown(results, evaluate(results, defaults))
+    assert.match(md, /Cancelled 1 other workflow run on this commit/)
+    assert.match(md, /Could not cancel \[CI\]/)
   })
 })

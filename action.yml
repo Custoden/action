@@ -1,5 +1,5 @@
 name: Custoden Check
-description: Check new and changed npm and PyPI dependencies and GitHub Actions workflows for malware and risky patterns.
+description: Check new and changed dependencies, workflows and CI files for malware and secret theft, and stop other runs when something is found.
 author: Custoden
 branding:
   icon: shield
@@ -10,7 +10,7 @@ inputs:
     description: 'Fail when a package verdict is this or worse: malicious, suspicious, review or never.'
     default: suspicious
   workflow-fail-on:
-    description: 'Fail when a workflow finding has this severity or higher: critical, high, medium, low or never.'
+    description: 'Fail when a workflow or CI file finding has this severity or higher: critical, high, medium, low or never.'
     default: high
   fail-on-incomplete:
     description: Fail when some packages or workflows could not be checked, for example because the rate limit was reached.
@@ -21,6 +21,12 @@ inputs:
   workflows:
     description: Analyze new and changed files in .github/workflows.
     default: 'true'
+  ci-files:
+    description: Analyze new and changed files that run during CI, such as package.json, conftest.py, setup.py, Makefiles and shell scripts.
+    default: 'true'
+  cancel-runs:
+    description: When the check fails, cancel other workflow runs for the same commit. Requires actions write permission.
+    default: 'false'
   comment:
     description: Post the results as a pull request comment. Requires pull-requests write permission.
     default: 'false'
@@ -41,8 +47,12 @@ outputs:
     description: Number of packages checked.
   workflows-checked:
     description: Number of workflows analyzed.
+  files-checked:
+    description: Number of CI files analyzed.
   findings:
-    description: Number of flagged packages plus workflow findings.
+    description: Number of flagged packages plus workflow and CI file findings.
+  cancelled-runs:
+    description: Number of other workflow runs that were cancelled.
   report:
     description: Path to the full JSON report.
 
