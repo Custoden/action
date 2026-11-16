@@ -1,0 +1,51 @@
+name: Custoden Check
+description: Check new and changed npm and PyPI dependencies and GitHub Actions workflows for malware and risky patterns.
+author: Custoden
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  fail-on:
+    description: 'Fail when a package verdict is this or worse: malicious, suspicious, review or never.'
+    default: suspicious
+  workflow-fail-on:
+    description: 'Fail when a workflow finding has this severity or higher: critical, high, medium, low or never.'
+    default: high
+  fail-on-incomplete:
+    description: Fail when some packages or workflows could not be checked, for example because the rate limit was reached.
+    default: 'false'
+  packages:
+    description: Check new and changed versions in lockfiles.
+    default: 'true'
+  workflows:
+    description: Analyze new and changed files in .github/workflows.
+    default: 'true'
+  comment:
+    description: Post the results as a pull request comment. Requires pull-requests write permission.
+    default: 'false'
+  max-packages:
+    description: Most packages to check in one run. The rest are reported as not checked.
+    default: '50'
+  github-token:
+    description: Token used to read files at the base commit and to post the comment.
+    default: ${{ github.token }}
+  api-url:
+    description: Custoden API base URL.
+    default: https://api.custoden.com
+
+outputs:
+  result:
+    description: pass or fail.
+  packages-checked:
+    description: Number of packages checked.
+  workflows-checked:
+    description: Number of workflows analyzed.
+  findings:
+    description: Number of flagged packages plus workflow findings.
+  report:
+    description: Path to the full JSON report.
+
+runs:
+  using: node24
+  main: src/index.js
